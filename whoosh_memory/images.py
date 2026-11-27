@@ -284,6 +284,7 @@ def search_images(
         embeddings=embeddings,
     )
 
+
 __all__ = [
     "IMAGE_EXTENSIONS",
     "image_metadata",

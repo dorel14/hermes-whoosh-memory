@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from .config import CONFIG_PATH, DEFAULTS, hermes_home, load_config
+from .config import DEFAULTS, config_path, hermes_home, load_config
 from .search import whoosh_search
 
 
@@ -29,12 +29,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     (pdata / "index").mkdir(parents=True, exist_ok=True)
     (pdata / "skills-index").mkdir(parents=True, exist_ok=True)
     (pdata / "embeddings").mkdir(parents=True, exist_ok=True)
-    if not CONFIG_PATH.exists():
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(
+    cfg_path = config_path()
+    if not cfg_path.exists():
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(
             json.dumps(DEFAULTS, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        print(f"Config créée : {CONFIG_PATH}")
+        print(f"Config créée : {cfg_path}")
     print(f"Index : {_default_index_dir()}")
     return 0
 

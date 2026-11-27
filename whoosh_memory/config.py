@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-__all__ = ["DEFAULTS", "hermes_home", "CONFIG_PATH", "load_config"]
+__all__ = ["DEFAULTS", "hermes_home", "config_path", "load_config"]
 
 #: Default configuration — mirrors spec section 8 ("Configuration exemple").
 DEFAULTS: Dict[str, Any] = {
@@ -57,15 +57,25 @@ DEFAULTS: Dict[str, Any] = {
 
 
 def hermes_home() -> Path:
-    """Resolve ``$HERMES_HOME`` (fallback: /opt/data)."""
+    """Resolve ``$HERMES_HOME``.
+
+    Raises:
+        RuntimeError: if ``$HERMES_HOME`` is not set. Paths must always derive
+            from the ``hermes_home`` received in ``initialize()``; we never
+            guess ``~/.hermes`` or any other hardcoded location (spec R6).
+    """
     env = os.environ.get("HERMES_HOME")
     if env:
         return Path(env).expanduser()
-    return Path("/opt/data")
+    raise RuntimeError(
+        "whoosh-memory: $HERMES_HOME n'est pas défini. "
+        "Lancez le plugin via Hermes, ou définissez HERMES_HOME pour l'usage CLI."
+    )
 
 
-#: Absolute path to the plugin's config file under HERMES_HOME.
-CONFIG_PATH: Path = hermes_home() / "plugin-data" / "whoosh-memory" / "config.json"
+#: Absolute path to the plugin's config file under HERMES_HOME (lazy).
+def config_path() -> Path:
+    return hermes_home() / "plugin-data" / "whoosh-memory" / "config.json"
 
 
 def _expand_paths(value: Any) -> Any:
@@ -89,7 +99,7 @@ def load_config(path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
         Never raises on a missing or malformed file — the defaults win.
     """
     cfg: Dict[str, Any] = dict(DEFAULTS)
-    p = Path(path) if path is not None else CONFIG_PATH
+    p = Path(path) if path is not None else config_path()
     try:
         with open(p, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -106,7 +116,3 @@ def load_config(path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     if isinstance(cfg.get("index_paths"), list):
         cfg["index_paths"] = _expand_paths(cfg["index_paths"])
     return cfg
-
-
-#: Convenience handle — the resolved config at import time (reload via load_config()).
-config: Dict[str, Any] = load_config()
