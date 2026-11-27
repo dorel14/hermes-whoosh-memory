@@ -1,29 +1,20 @@
-from __future__ import annotations
+"""whoosh-memory plugin for Hermes Agent — package entry point.
 
-"""Package whoosh-memory (plugin Hermes).
+Local hybrid (BM25 + vector) memory provider: indexes Hermes session
+history, MEMORY.md / USER.md, local documents, skills and images into a
+whoosh-ng index for fast offline retrieval with automatic context
+prefetch before each turn. 100 % local, no network calls.
 
-Fournit un backend de mémoire local hybride (BM25 + embeddings) indexant
-l'historique des sessions, MEMORY.md / USER.md, les documents locaux et les
-skills Hermes dans un index whoosh-ng pour une récupération hors-ligne rapide.
-
-Le plugin est 100 % local : aucun appel réseau n'est nécessaire. La recherche
-vectorielle utilise le champ natif ``whoosh_modern.fields.VECTOR`` (v0.3.0).
+The real plugin registration lives in ``whoosh_memory/__init__.py``; this
+thin shim re-exports everything so ``import whoosh_memory`` works whether
+the package is installed via pip or added directly to PYTHONPATH.
 """
 
-from .config import DEFAULTS, load_config
-
-__version__ = "0.3.0"
+from whoosh_memory import (
+    DEFAULTS,
+    load_config,
+    register,
+    __version__,
+)
 
 __all__ = ["__version__", "register", "DEFAULTS", "load_config"]
-
-
-def register(ctx) -> None:
-    """Point d'entrée du plugin (appelé par Hermes au chargement).
-
-    Enregistre les outils, hooks et commandes fournis par whoosh-memory.
-
-    Args:
-        ctx: contexte du plugin fourni par Hermes (tools, hooks, log, config...).
-    """
-    # Scaffold : l'enregistrement effectif des outils/hooks sera branché ici.
-    return None

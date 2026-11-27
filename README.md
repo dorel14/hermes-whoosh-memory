@@ -1,131 +1,93 @@
-# whoosh-memory — Mémoire hybride BM25 + embeddings locales
+# whoosh-memory — Mémoire locale hybride pour Hermes Agent
 
-Plugin de mémoire pour [Hermes Agent](https://github.com/NousResearch/hermes-agent) :
-indexe l'historique des sessions, MEMORY.md / USER.md, les dossiers de documents
-locaux et les skills Hermes dans un index **whoosh-ng (BM25)**, avec une couche
-semantique optionnelle (**embeddings locaux**) et une **fusion hybride** des
-résultats.
-
-- 100 % local : aucun appel réseau n'est obligatoire (Ollama en option).
-- Degrade proprement en **BM25 pur** si aucun provider d'embeddings n'est
-  disponible.
-- Importeble sans whoosh-ng ; le backend whoosh-ng est charge paresseusement
-  par `indexer.py` / `search.py`.
-
-## Gestion vectorielle (whoosh-ng moderne)
-
-Depuis la v0.3.0, la recherche vectorielle utilise le **vrai champ vectoriel
-natif de whoosh-ng**, `whoosh_modern.fields.VECTOR` — et non l'API 2.x
-classique (`whoosh.fields.VECTOR` n'existe pas ; `VectorField(dimensions=...)`
-de `whoosh.vector` est une API distincte, à fournisseur externe).
-
-- `schema.get_schema(dimension=384)` déclare `embedding=VECTOR(stored=True,
-  dimension=dimension, normalized=True)` : chaque vecteur est L2-normalisé à
-  l'écriture, donc la recherche par `VectorSearcher` est une **similarité
-  cosinus exacte** (produit scalaire).
-- `search.whoosh_search(..., mode="vector")` → `VectorSearcher` (cosinus pur,
-  top-k via `np.argpartition`).
-- `search.whoosh_search(..., mode="hybrid")` → `HybridSearcher` en **mode
-  colonne native** (`vector_column="embedding"`), sans provider externe : le
-  vecteur vit dans l'index, la fusion se fait par `docnum` (pondérée via
-  `alpha`, ou RRF via `rrf_k`).
-- `indexer.index_document(..., embedding=vec)` stocke le vecteur d'un document
-  de l'index principal ; `search.index_documents(..., embeddings=...)` encode
-  chaque chunk à l'indexation.
-- La dimension du champ doit correspondre à celle du provider d'embeddings :
-  `VECTOR(dimension=...)` valide la longueur à l'écriture (sinon
-  `ValueError`). Passez `dimension=` à `whoosh_search`/`index_documents`.
-
-Mode effectif résolu par `whoosh_search` : `mode` (`bm25` | `vector` |
-`hybrid` | `auto`) est prioritaire ; sinon `hybrid` (bool/str) puis
-`use_embeddings`. Sans provider d'embeddings disponible, `vector`/`hybrid`
-retombent sur BM25.
-
-Les embeddings et la fusion hybride sont specifies aux sections **7.2** et
-**7.3** du spec ; le plan de developpement (4 phases) a la section **10**.
+Un plugin Hermes 100 % local qui indexe l'historique des sessions, MEMORY.md / USER.md,
+les documents locaux, les skills Hermes et les images dans un index whoosh-ng
+(BM25 + recherche vectorielle native) pour une récupération hors-ligne rapide
+avec prefetch automatique avant chaque turn.
 
 ## Installation
 
+### Depuis les sources (développement)
+
 ```bash
-# Backend de recherche (obligatoire)
-pip install whoosh-ng
-
-# Provider d'embeddings (optionnel, recommande)
-pip install fastembed                # CPU / ONNX, sans PyTorch (recommande)
-# ou
-pip install sentence-transformers    # PyTorch, modeles plus lourds
-# ou utilisez Ollama (aucune dependance Python supplementaire)
+git clone https://github.com/dorel14/hermes-whoosh-memory.git
+cd hermes-whoosh-memory
+pip install -e .
 ```
 
-## Configuration
+### Depuis GitHub (utilisateur)
 
-```yaml
-# ~/.hermes/plugins/whoosh-memory/config.yaml
-whoosh_memory:
-  index_dir: "~/.hermes/plugin-data/whoosh-memory/index"
-  skills_index_dir: "~/.hermes/plugin-data/whoosh-memory/skills-index"
-  default_top_k: 10
-  hybrid_enabled: "auto"          # auto | true | false
-  hybrid_method: "rrf"            # rrf | weighted
-  hybrid_weight_bm25: 0.65
-  hybrid_weight_vector: 0.35
-  embedding_provider: "auto"      # auto | fastembed | sentence-transformers | ollama
-  embedding_model: "multilingual-e5-small"
-  embedding_dim: 384
-  embedding_cache_dir: "~/.hermes/plugin-data/whoosh-memory/embeddings_cache"
-  chunk_size: 1000
-  chunk_overlap: 150
+```bash
+pip install git+https://github.com/dorel14/hermes-whoosh-memory.git
 ```
 
-## Utilisation
+### Déploiement pour Lina (sur l'hôte Hermes)
 
-```python
-from whoosh_memory.embeddings import Embeddings, HybridFuser, ScoredDoc, fuse_hybrid
-
-emb = Embeddings(provider="fastembed", model="multilingual-e5-small")
-
-# 1. Encoder la requete (vecteur de requete)
-qvec = emb.embed("comment creer un plugin hermes ?")
-
-# 2. Recherche BM25
-bm25 = searcher.search("comment creer un plugin hermes", limit=10)
-
-# 3. Fusion hybride avec une recherche BM25 existante (resultats whoosh)
-vector = emb.embed("comment creer un plugin hermes")
-fused = fuse_hybrid(bm25, vector, mode="rrf")        # RRF, k=60
-fused = fuse_hybrid(bm25, vector, mode="weighted", alpha=0.65)
+```bash
+cd /opt/data/plugins/hermes-whoosh-memory
+pip install -e .
+# puis déclarer le plugin dans la config de Lina
 ```
 
-## Providers et modeles francais
+## Utilisation CLI
 
-| Provider | Modeles | Dimension | Notes |
-|---|---|---|---|
-| fastembed | multilingual-e5-small | 384 | CPU ONNX, sans PyTorch |
-| fastembed | multilingual-e5-base | 768 | CPU ONNX, sans PyTorch |
-| fastembed | bge-small | 512 | CPU ONNX, sans PyTorch |
-| sentence-transformers | BAAI/bge-m3 | 1024 | PyTorch |
-| sentence-transformers | multilingual-e5-base | 768 | PyTorch |
-| ollama | nomic-embed-text | 768 | requiert un serveur Ollama local |
+```bash
+whoosh-memory init              # créer les dossiers + config par défaut
+whoosh-memory config            # afficher la configuration
+whoosh-memory search "requête"  # rechercher dans l'index
+whoosh-memory index ./docs      # indexer un dossier de documents
+whoosh-memory index-images ./Photos  # indexer un dossier d'images
+whoosh-memory stats             # statistiques de l'index
+```
 
-## Cache par hache de contenu
+## Outils agents (MCP / registre Hermes)
 
-Chaque document est hache (SHA-256) a l'indexation ; un document est reindexe
-uniquement si sa hache a change (`needs_reindex`).
+| Outil | Rôle |
+|-------|------|
+| `whoosh_search` | Recherche hybride (texte + vecteur) dans l'index |
+| `whoosh_open` | Lire un document par id ou path |
+| `whoosh_forget` | Supprimer un document de l'index |
+| `whoosh_stats` | Statistiques de l'index |
+| `whoosh_add` | Ajouter un document manuellement |
+| `whoosh_image_base64` | Convertir une image indexée en base64 pour le MCP vision |
+| `whoosh_image_info` | Métadonnées d'une image indexée |
 
-## Mode degrade (BM25 pur)
+## Indexation d'images (spec v0.2)
 
-Sans provider d'embeddings disponible :
+Les images sont indexées avec chemin absolu + métadonnées + embedding optionnel
+(jamais le base64 ni le binaire stocké). La conversion base64 se fait à la
+volée via `whoosh_image_base64` pour le MCP vision existant.
 
-- la recherche vectorielle (`vector`) et la fusion (`hybrid`) retombent
-  automatiquement sur BM25 ;
-- `HybridFuser` avec `mode="bm25"` retourne simplement les resultats BM25.
+Configuration (dans `whoosh-memory.json` sous `HERMES_HOME/plugin-data/whoosh-memory/`) :
 
-## Fusion hybride (Section 7.3)
+```json
+{
+  "index_images": true,
+  "index_image_paths": ["~/Photos", "~/Pictures", "~/screenshots"],
+  "image_ocr": false,
+  "image_embedding": true,
+  "image_embedding_provider": "libembedding-ng",
+  "image_max_mb": 20,
+  "image_max_dimension": 1024,
+  "image_base64_max_mb": 10
+}
+```
 
-Deux strategies, pilotees par `hybrid_method` (config) ou le paramètre `mode`
-de `fuse_hybrid` :
+## Sécurité
 
-- **RRF** (`mode="rrf"`) : `score = sum(1 / (k + rank_i))`, k=60 par defaut.
-   Ideal quand BM25 et les vecteurs ont des echelles de score incomparables.
-- **Ponderee** (`mode="weighted"`) : `score = alpha * bm25_norm + (1 - alpha) * vector_norm`,
-  avec normalisation min-max. `alpha = hybrid_weight_bm25` par defaut (0.65).
+Les chemins sous `HERMES_HOME` contenant des credentials sont exclus par une
+denylist stricte. Aucun identifiant, clé d'API ou jeton MCP n'est stocké en
+clair : ils sont anonymisés par `[REDACTED]`.
+
+## Dépendances
+
+- Requis : `whoosh-ng>=0.3.0`
+- Optionnel : `fastembed`, `sentence-transformers`, `ollama`, `Pillow`
+
+```bash
+pip install "hermes-whoosh-memory[all]"
+```
+
+## Licence
+
+MIT — voir `LICENSE`.
