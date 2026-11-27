@@ -24,6 +24,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+
+def _tokenize(text: str) -> list[str]:
+    """Tokenise un texte en minuscules (alphanumérique uniquement)."""
+    return re.findall(r"[a-zA-Z0-9\u00c0-\u024f]+", text.lower())
+
+
 from .extractors import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,

@@ -10,5 +10,7 @@ tags: [memory, whoosh, search]
 # lazily by indexer.py / search.py so the package stays importable and inspectable
 # even before whoosh-ng is installed. Vector (semantic) support is optional and
 # degrades gracefully to BM25-only.
-provides_tools: [whoosh_search, whoosh_open, whoosh_index, whoosh_forget, whoosh_stats, whoosh_add]
-provides_hooks: [prefetch, sync_turn, on_memory_write, on_session_end, on_pre_compress, system_prompt_block, initialize]
+#
+# C'est un Memory Provider Hermes : l'enregistrement se fait via
+# ``ctx.register_memory_provider(WhooshMemoryProvider())`` dans ``register(ctx)``.
+# ``provides_tools`` / ``provides_hooks`` ne s'appliquent pas aux memory providers.
