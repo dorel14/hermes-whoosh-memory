@@ -55,7 +55,7 @@ where = ["."]
 include = ["whoosh_memory*"]
 
 [tool.setuptools.package-data]
-whoosh_memory = ["plugin.yaml", "README.md"]
+whoosh_memory = ["plugin.yaml"]
 
 [tool.black]
 line-length = 100
