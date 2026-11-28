@@ -1,322 +1,122 @@
-"""Whoosh-memory memory provider for Hermes Agent.
+"""Fournisseur de mémoire ``whoosh-memory`` pour Hermes Agent.
 
-Implements the ``MemoryProvider`` interface (agent/memory_provider.py) using a
-local whoosh-ng index (BM25 + optional vector). All paths derive from
-``hermes_home`` received in ``initialize()`` — never hardcoded.
+Implémente ``agent.memory_provider.MemoryProvider`` au-dessus d'un index
+whoosh-ng local (repli BM25 pur Python si whoosh-ng est absent).
 
-Optional dependencies (embeddings, images) are imported lazily inside the
-functions that need them, per R5 of the contract.
+Contrat respecté (voir docs/HERMES_CONTRACT.md) :
+
+- tous les chemins dérivent du ``hermes_home`` reçu par ``initialize()`` ;
+  rien n'est gardé au niveau du module ou de la classe (isolation des profils) ;
+- ``sync_turn()`` ne bloque pas : les écritures passent par une file traitée
+  par un unique thread créé avec ``spawn_context_thread`` ;
+- aucune écriture automatique quand ``agent_context`` n'est pas ``primary``
+  (cron, sous-agent, flush) ;
+- ``handle_tool_call()`` renvoie toujours une chaîne JSON, erreurs comprises.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import os
+import queue
+import threading
+import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from agent.memory_provider import MemoryProvider, spawn_context_thread, RecallStatus
+from agent.memory_provider import (
+    MemoryProvider,
+    RecallStatus,
+    is_trivial_prompt,
+    spawn_context_thread,
+)
 
-from .search import SearchHit, _Index, whoosh_search, index_documents
-from .tools import whoosh_open, whoosh_forget, whoosh_stats, whoosh_add
-from .config import DEFAULTS, load_config
+from .config import load_config
+from .search import whoosh_search
+from .tools import whoosh_add, whoosh_forget, whoosh_open, whoosh_stats
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["WhooshMemoryProvider", "register"]
+__all__ = ["WhooshMemoryProvider", "register", "PROVIDER_NAME"]
+
+PROVIDER_NAME = "whoosh-memory"
+
+#: Délai maximal d'attente du thread d'écriture (flush / arrêt), en secondes.
+_FLUSH_TIMEOUT = 10.0
 
 
 def register(ctx) -> None:
-    """Plugin entry point called by Hermes at load time.
+    """Point d'entrée appelé par Hermes : enregistre une NOUVELLE instance."""
+    ctx.register_memory_provider(WhooshMemoryProvider())
 
-    Registers a fresh :class:`WhooshMemoryProvider` instance via
-    ``ctx.register_memory_provider``. A new instance is created on every call
-    so concurrent sessions never share state.
-    """
-    provider = WhooshMemoryProvider()
-    ctx.register_memory_provider(provider)
-    logger.info("whoosh-memory: MemoryProvider enregistré")
+
+def _memory_doc_id(target: str, content: str) -> str:
+    """Identifiant stable d'une entrée MEMORY.md / USER.md (dérivé du contenu)."""
+    digest = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()[:20]
+    return f"memory:{target}:{digest}"
 
 
 class WhooshMemoryProvider(MemoryProvider):
-    """Local hybrid (BM25 + vector) memory provider backed by whoosh-ng."""
-
-    pre_compress_checkpoint_api_version = 1
+    """Mémoire locale hybride (BM25 + vecteurs optionnels) sur whoosh-ng."""
 
     def __init__(self) -> None:
         self._hermes_home: Optional[Path] = None
+        self._data_dir: Optional[Path] = None
         self._index_dir: Optional[Path] = None
-        self._index: Optional[_Index] = None
-        self._session_id: Optional[str] = None
         self._config: dict[str, Any] = {}
+        self._session_id = ""
+        self._writes_enabled = False
         self._initialized = False
+        self._last_recall_count: Optional[int] = None
+        # Un seul verrou pour toutes les opérations d'index (lecture et écriture) :
+        # whoosh n'autorise qu'un writer à la fois.
+        self._index_lock = threading.Lock()
+        self._queue: "queue.Queue[Optional[Callable[[], None]]]" = queue.Queue()
+        self._worker: Optional[threading.Thread] = None
 
-    # -- lifecycle -----------------------------------------------------------
+    # -- identité / disponibilité --------------------------------------------
 
     @property
     def name(self) -> str:
-        return "whoosh-memory"
+        return PROVIDER_NAME
 
     def is_available(self) -> bool:
-        """Always available: whoosh-ng if present, else pure-Python BM25."""
+        """Toujours disponible : whoosh-ng si présent, sinon BM25 pur. Aucun réseau."""
         return True
+
+    # -- cycle de vie ---------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs) -> None:
         hermes_home = kwargs.get("hermes_home")
-        if hermes_home is None:
-            raise TypeError("whoosh-memory: initialize() requires hermes_home")
+        if not hermes_home:
+            raise ValueError("whoosh-memory: initialize() requiert hermes_home")
         self._hermes_home = Path(hermes_home)
-        self._index_dir = self._hermes_home / "plugin-data" / "whoosh-memory" / "index"
-        self._session_id = session_id
-        self._config = dict(DEFAULTS)
-        cfg_path = self._hermes_home / "plugin-data" / "whoosh-memory" / "config.json"
-        try:
-            self._config = load_config(cfg_path)
-        except Exception:  # pragma: no cover - config never crashes the provider
-            logger.debug("whoosh-memory: config non chargé, defaults utilisés")
-        # Open the index lazily on first use; _Index handles missing dir.
-        self._index = _Index(self._index_dir)
-        self._index.finish()
+        self._data_dir = self._hermes_home / PROVIDER_NAME
+        self._index_dir = self._data_dir / "index"
+        self._index_dir.mkdir(parents=True, exist_ok=True)
+        self._config = load_config(self._data_dir / "config.json")
+        self._session_id = session_id or ""
+        agent_context = kwargs.get("agent_context") or "primary"
+        self._writes_enabled = agent_context == "primary"
+        if self._writes_enabled:
+            self._worker = spawn_context_thread(self._drain, name="whoosh-memory-writer")
+            self._worker.start()
         self._initialized = True
-        logger.info("whoosh-memory: initialisé (session=%s, index=%s)", session_id, self._index_dir)
-
-    def unavailable_reason(self) -> str:
-        return ""
-
-    def system_prompt_block(self) -> str:
-        return (
-            "Vous disposez d'un index mémoire local whoosh-memory (BM25 + "
-            "optionnel vectoriel). Utilisez whoosh_search pour retrouver des "
-            "documents passés, whoosh_open pour les lire, whoosh_forget pour "
-            "les supprimer, whoosh_stats pour les statistiques et whoosh_add "
-            "pour ajouter des documents."
+        logger.info(
+            "whoosh-memory: initialisé (context=%s, index=%s)", agent_context, self._index_dir
         )
-
-    # -- recall / prefetch ---------------------------------------------------
-
-    def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Return formatted recall context for the upcoming turn.
-
-        Runs a whoosh_search and returns a short, human-readable block.
-        Must be fast: results are cached from the open index.
-        """
-        if not query or not self._initialized:
-            return ""
-        try:
-            top_k = int(self._config.get("prefetch_top_k", 3))
-            hits = whoosh_search(str(self._index_dir), query, top_k=top_k)
-        except Exception as exc:  # pragma: no cover - recall never blocks a turn
-            logger.debug("whoosh-memory: prefetch échec: %s", exc)
-            return ""
-        if not hits:
-            return ""
-        lines = ["### Contexte mémoire (whoosh-memory)"]
-        for h in hits:
-            snippet = (h.snippet or h.title or "")[:200]
-            lines.append(f"- {h.title or h.path or h.doc_id}: {snippet}")
-        return "\n".join(lines)
-
-    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        """No-op: prefetch is synchronous and fast enough to not queue."""
-        return None
-
-    def recall_status(self) -> Optional[RecallStatus]:
-        if not self._initialized or self._index is None:
-            return None
-        try:
-            stats = whoosh_stats(str(self._index_dir))
-        except Exception:
-            return None
-        count = stats.get("documents", 0)
-        return RecallStatus(
-            provider_label=self.name,
-            count=count,
-        )
-
-    # -- turn sync -----------------------------------------------------------
-
-    def sync_turn(
-        self,
-        user_content: str,
-        assistant_content: str,
-        *,
-        session_id: str = "",
-        messages: Optional[list[dict[str, Any]]] = None,
-        turn_author: Optional[dict[str, Any]] = None,
-    ) -> None:
-        """Index the current conversation turn into the whoosh index."""
-        if not self._initialized:
-            return
-        text = f"Utilisateur: {user_content}\nAssistant: {assistant_content}".strip()
-        if not text:
-            return
-        doc_id = f"turn:{session_id or self._session_id}:{os.urandom(4).hex()}"
-        try:
-            whoosh_add(
-                str(self._index_dir),
-                id=doc_id,
-                path=f"session:{session_id or self._session_id}",
-                title="Tour de conversation",
-                content=text,
-                type="conversation",
-            )
-        except Exception as exc:  # pragma: no cover
-            logger.debug("whoosh-memory: sync_turn échec: %s", exc)
-
-    # -- tools ---------------------------------------------------------------
-
-    def get_tool_schemas(self) -> list[dict[str, Any]]:
-        """OpenAI function-calling schemas for the whoosh-memory tools."""
-        return [
-            {
-                "name": "whoosh_search",
-                "description": "Recherche dans l'index mémoire whoosh-memory (BM25, optionnel hybride/vectoriel).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Texte de la recherche."},
-                        "top_k": {"type": "integer", "description": "Nombre de résultats (défaut 10).", "default": 10},
-                        "hybrid": {
-                            "type": "string",
-                            "description": "'auto' | 'true' | 'false' — mode de recherche (défaut 'auto').",
-                            "default": "auto",
-                        },
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "whoosh_open",
-                "description": "Lit un document indexé par id ou path.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Identifiant du document."},
-                        "path": {"type": "string", "description": "Chemin du document."},
-                        "offset": {"type": "integer", "description": "Décalage en caractères (défaut 0).", "default": 0},
-                        "max_chars": {
-                            "type": "integer",
-                            "description": "Nombre max de caractères à renvoyer (défaut 4000).",
-                            "default": 4000,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "whoosh_forget",
-                "description": "Supprime un document de l'index par id ou path.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Identifiant du document à supprimer."},
-                        "path": {"type": "string", "description": "Chemin du document à supprimer."},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "whoosh_stats",
-                "description": "Renvoie les statistiques de l'index whoosh-memory.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "whoosh_add",
-                "description": "Ajoute un document manuellement à l'index.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Identifiant du document."},
-                        "path": {"type": "string", "description": "Chemin du document."},
-                        "title": {"type": "string", "description": "Titre du document."},
-                        "content": {"type": "string", "description": "Contenu texte à indexer."},
-                        "type": {
-                            "type": "string",
-                            "description": "Type de document (défaut 'explicit').",
-                            "default": "explicit",
-                        },
-                    },
-                    "required": ["id", "path", "title", "content"],
-                    "additionalProperties": False,
-                },
-            },
-        ]
-
-    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
-        """Handle one whoosh-memory tool; returns a JSON string."""
-        index_dir = str(self._index_dir) if self._index_dir else ""
-
-        if tool_name == "whoosh_search":
-            query = args.get("query", "")
-            top_k = int(args.get("top_k", 10))
-            hybrid = args.get("hybrid", "auto")
-            hits = whoosh_search(index_dir, query, top_k=top_k, hybrid=hybrid)
-            return json.dumps([asdict(h) for h in hits], ensure_ascii=False)
-
-        if tool_name == "whoosh_open":
-            result = whoosh_open(
-                index_dir,
-                id=args.get("id"),
-                path=args.get("path"),
-                offset=int(args.get("offset", 0)),
-                max_chars=int(args.get("max_chars", 4000)),
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        if tool_name == "whoosh_forget":
-            result = whoosh_forget(
-                index_dir,
-                id=args.get("id"),
-                path=args.get("path"),
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        if tool_name == "whoosh_stats":
-            result = whoosh_stats(index_dir)
-            return json.dumps(result, ensure_ascii=False)
-
-        if tool_name == "whoosh_add":
-            result = whoosh_add(
-                index_dir,
-                id=args["id"],
-                path=args["path"],
-                title=args.get("title", ""),
-                content=args.get("content", ""),
-                type=args.get("type", "explicit"),
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        raise NotImplementedError(
-            f"whoosh-memory: outil inconnu '{tool_name}'"
-        )
-
-    # -- lifecycle hooks -----------------------------------------------------
 
     def shutdown(self) -> None:
-        self._index = None
+        if self._worker is not None:
+            self._queue.put(None)  # sentinelle d'arrêt
+            self._worker.join(timeout=_FLUSH_TIMEOUT)
+            self._worker = None
         self._initialized = False
 
-    def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
-        return None
-
-    def identity_signature(self) -> dict[str, Any]:
-        return {
-            "provider": self.name,
-            "index_dir": str(self._index_dir) if self._index_dir else "",
-            "initialized": self._initialized,
-        }
-
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
-        """Persist the index at end of session."""
-        if self._index is not None:
-            self._index.finish()
+        self._flush()
 
     def on_session_switch(
         self,
@@ -327,79 +127,109 @@ class WhooshMemoryProvider(MemoryProvider):
         rewound: bool = False,
         **kwargs,
     ) -> None:
-        self._session_id = new_session_id
-        if reset and self._index is not None:
-            self._index.finish()
+        if reset:
+            self._flush()
+        self._session_id = new_session_id or ""
 
-    def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
-        """Checkpoint: flush the index before context compression."""
-        if self._index is not None:
-            self._index.finish()
-        return ""
+    # -- file d'écriture (thread unique) ---------------------------------------
 
-    def on_delegation(
-        self, task: str, result: str, *, child_session_id: str = "", **kwargs
-    ) -> None:
-        return None
+    def _drain(self) -> None:
+        while True:
+            job = self._queue.get()
+            try:
+                if job is None:
+                    return
+                with self._index_lock:
+                    job()
+            except Exception as exc:  # une écriture ratée ne doit jamais tuer le thread
+                logger.warning("whoosh-memory: écriture échouée: %s", exc)
+            finally:
+                self._queue.task_done()
 
-    # -- config --------------------------------------------------------------
+    def _submit(self, job: Callable[[], None]) -> None:
+        if self._writes_enabled and self._worker is not None:
+            self._queue.put(job)
 
-    def get_config_schema(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "key": "index_sessions",
-                "description": "Indexer l'historique des sessions de conversation.",
-                "type": "boolean",
-                "default": True,
-            },
-            {
-                "key": "index_tool_results",
-                "description": "Indexer les résultats d'outils agents.",
-                "type": "boolean",
-                "default": False,
-            },
-            {
-                "key": "index_paths",
-                "description": "Chemins de fichiers locaux à indexer.",
-                "type": "text",
-                "default": "~/Documents, ~/notes",
-            },
-            {
-                "key": "prefetch_top_k",
-                "description": "Nombre de résultats retournés par prefetch.",
-                "type": "integer",
-                "default": 3,
-                "minimum": 1,
-                "maximum": 20,
-            },
-            {
-                "key": "chunk_size",
-                "description": "Taille des chunks d'indexation (caractères).",
-                "type": "integer",
-                "default": 1000,
-                "minimum": 100,
-                "maximum": 5000,
-            },
-        ]
+    def _flush(self) -> None:
+        """Attend (avec délai max) que les écritures en file soient appliquées."""
+        if self._worker is None:
+            return
+        done = threading.Event()
+        self._queue.put(done.set)
+        done.wait(timeout=_FLUSH_TIMEOUT)
 
-    def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
-        cfg_path = Path(hermes_home) / "plugin-data" / "whoosh-memory" / "config.json"
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._config = dict(values)
+    # -- prompt / rappel --------------------------------------------------------
 
-    def read_config_fields(self, hermes_home: str) -> dict[str, Any]:
-        cfg_path = Path(hermes_home) / "plugin-data" / "whoosh-memory" / "config.json"
+    def system_prompt_block(self) -> str:
+        return (
+            "Une mémoire locale whoosh-memory indexe les conversations passées et les "
+            "entrées de mémoire. Utilise whoosh_search pour y retrouver une information "
+            "ancienne, puis whoosh_open pour lire un résultat en entier."
+        )
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        self._last_recall_count = None
+        if not self._initialized or is_trivial_prompt(query):
+            return ""
+        top_k = int(self._config.get("prefetch_top_k", 3))
+        max_chars = int(self._config.get("prefetch_max_chars", 3000))
         try:
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-        return {"values": data, "placeholders": {}}
+            with self._index_lock:
+                hits = whoosh_search(str(self._index_dir), query, top_k=top_k)
+        except Exception as exc:  # le rappel ne doit jamais bloquer un tour
+            logger.debug("whoosh-memory: prefetch échoué: %s", exc)
+            return ""
+        if not hits:
+            return ""
+        lines = ["Contexte retrouvé dans la mémoire locale (whoosh-memory) :"]
+        used = len(lines[0])
+        count = 0
+        for hit in hits:
+            line = f"- [{hit.doc_id}] {hit.title}: {(hit.snippet or '').strip()}"
+            if used + len(line) > max_chars:
+                break
+            lines.append(line)
+            used += len(line)
+            count += 1
+        if not count:
+            return ""
+        self._last_recall_count = count
+        return "\n".join(lines)
 
-    def write_config_fields(self, values: dict[str, Any], hermes_home: str) -> None:
-        self.save_config(values, hermes_home)
+    def recall_status(self) -> Optional[RecallStatus]:
+        if not self._last_recall_count:
+            return None
+        return RecallStatus(provider_label=PROVIDER_NAME, count=self._last_recall_count)
 
-    # -- memory write mirror -------------------------------------------------
+    # -- écritures automatiques -------------------------------------------------
+
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages: Optional[list[dict[str, Any]]] = None,
+        turn_author: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if not self._config.get("index_sessions", True):
+            return
+        text = f"Utilisateur : {user_content or ''}\nAssistant : {assistant_content or ''}"
+        if not (user_content or assistant_content):
+            return
+        sid = session_id or self._session_id
+        doc_id = f"turn:{sid}:{uuid.uuid4().hex[:12]}"
+        index_dir = str(self._index_dir)
+        self._submit(
+            lambda: whoosh_add(
+                index_dir,
+                id=doc_id,
+                path=f"session:{sid}",
+                title=f"Conversation {sid}",
+                content=text,
+                type="session_turn",
+            )
+        )
 
     def on_memory_write(
         self,
@@ -408,25 +238,209 @@ class WhooshMemoryProvider(MemoryProvider):
         content: str,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Mirror MEMORY.md / USER.md writes into the whoosh index."""
-        if not self._initialized or not content:
-            return
-        doc_id = f"memory:{target}:{os.urandom(4).hex()}"
+        """Reflète une écriture de la mémoire intégrée (add | replace | remove)."""
+        previous = (metadata or {}).get("previous_content") or ""
+        index_dir = str(self._index_dir)
+        path = f"memory:{target}"
+        title = "Profil utilisateur" if target == "user" else "Mémoire"
+
+        def job() -> None:
+            if action in ("replace", "remove"):
+                old = previous or (content if action == "remove" else "")
+                if old:
+                    whoosh_forget(index_dir, id=_memory_doc_id(target, old))
+            if action in ("add", "replace") and content:
+                whoosh_add(
+                    index_dir,
+                    id=_memory_doc_id(target, content),
+                    path=path,
+                    title=title,
+                    content=content,
+                    type="memory",
+                )
+
+        self._submit(job)
+
+    # -- outils -------------------------------------------------------------------
+
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "whoosh_search",
+                "description": "Recherche plein texte (BM25) dans la mémoire locale whoosh-memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Texte recherché."},
+                        "limit": {
+                            "type": "integer",
+                            "description": "Nombre de résultats (1 à 20, défaut 5).",
+                            "minimum": 1,
+                            "maximum": 20,
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "whoosh_open",
+                "description": "Lit un document de la mémoire par id (ou path), page par page.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "id renvoyé par whoosh_search."},
+                        "path": {"type": "string", "description": "path du document."},
+                        "offset": {"type": "integer", "minimum": 0, "description": "Défaut 0."},
+                        "max_chars": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 20000,
+                            "description": "Défaut 4000.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "whoosh_add",
+                "description": "Enregistre explicitement une note dans la mémoire locale.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Titre court."},
+                        "content": {"type": "string", "description": "Texte à mémoriser."},
+                    },
+                    "required": ["content"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "whoosh_forget",
+                "description": "Supprime un document par id (ou tous ceux d'un path).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "path": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "whoosh_stats",
+                "description": "Statistiques de la mémoire locale (nombre de documents par type).",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        ]
+
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
         try:
-            whoosh_add(
-                str(self._index_dir),
-                id=doc_id,
-                path=f"memory:{target}",
-                title=f"Mémoire {target}",
-                content=content,
-                type="memory",
-            )
-        except Exception as exc:  # pragma: no cover
-            logger.debug("whoosh-memory: on_memory_write échec: %s", exc)
+            result = self._dispatch(tool_name, args or {})
+        except Exception as exc:
+            logger.warning("whoosh-memory: outil %s en échec: %s", tool_name, exc)
+            result = {"error": f"{type(exc).__name__}: {exc}"}
+        return json.dumps(result, ensure_ascii=False, default=str)
 
-    # -- backup --------------------------------------------------------------
+    def _dispatch(self, tool_name: str, args: dict[str, Any]) -> Any:
+        if not self._initialized:
+            return {"error": "whoosh-memory n'est pas initialisé"}
+        index_dir = str(self._index_dir)
 
-    def backup_paths(self) -> list[str]:
-        if self._index_dir is None:
-            return []
-        return [str(self._index_dir)]
+        if tool_name == "whoosh_search":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return {"error": "query est obligatoire"}
+            limit = min(max(int(args.get("limit", 5)), 1), 20)
+            with self._index_lock:
+                hits = whoosh_search(index_dir, query, top_k=limit)
+            return {"results": [asdict(h) for h in hits]}
+
+        if tool_name == "whoosh_open":
+            if not (args.get("id") or args.get("path")):
+                return {"error": "id ou path est obligatoire"}
+            with self._index_lock:
+                doc = whoosh_open(
+                    index_dir,
+                    id=args.get("id"),
+                    path=args.get("path"),
+                    offset=int(args.get("offset", 0)),
+                    max_chars=min(int(args.get("max_chars", 4000)), 20000),
+                )
+            return doc if doc is not None else {"error": "document introuvable"}
+
+        if tool_name == "whoosh_add":
+            content = str(args.get("content") or "").strip()
+            if not content:
+                return {"error": "content est obligatoire"}
+            doc_id = f"explicit:{uuid.uuid4().hex[:16]}"
+            self._flush()
+            with self._index_lock:
+                whoosh_add(
+                    index_dir,
+                    id=doc_id,
+                    path=doc_id,
+                    title=str(args.get("title") or "Note"),
+                    content=content,
+                    type="explicit",
+                )
+            return {"ok": True, "id": doc_id}
+
+        if tool_name == "whoosh_forget":
+            if not (args.get("id") or args.get("path")):
+                return {"error": "id ou path est obligatoire"}
+            self._flush()
+            with self._index_lock:
+                removed = whoosh_forget(index_dir, id=args.get("id"), path=args.get("path"))
+            return {"removed": removed}
+
+        if tool_name == "whoosh_stats":
+            with self._index_lock:
+                stats = whoosh_stats(index_dir)
+            return stats
+
+        return {"error": f"outil inconnu : {tool_name}"}
+
+    # -- configuration -------------------------------------------------------------
+
+    def get_config_schema(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "key": "index_sessions",
+                "description": "Indexer chaque tour de conversation.",
+                "type": "boolean",
+                "default": True,
+            },
+            {
+                "key": "prefetch_top_k",
+                "description": "Nombre de souvenirs injectés avant chaque tour.",
+                "type": "integer",
+                "default": 3,
+                "minimum": 0,
+                "maximum": 10,
+            },
+            {
+                "key": "prefetch_max_chars",
+                "description": "Budget de caractères du contexte injecté.",
+                "type": "integer",
+                "default": 3000,
+                "minimum": 200,
+                "maximum": 20000,
+            },
+        ]
+
+    def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
+        path = Path(hermes_home) / PROVIDER_NAME / "config.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(current, dict):
+                current = {}
+        except (OSError, ValueError):
+            current = {}
+        current.update(values or {})
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+        if self._hermes_home is not None and Path(hermes_home) == self._hermes_home:
+            self._config.update(values or {})
