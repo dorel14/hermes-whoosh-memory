@@ -1,173 +1,85 @@
-# whoosh-memory — Mémoire locale hybride pour Hermes Agent
+# whoosh-memory — mémoire locale pour Hermes Agent
 
-Un **Memory Provider** Hermes 100 % local qui indexe l'historique des sessions,
-MEMORY.md / USER.md, les documents locaux, les skills Hermes et les images dans
-un index **whoosh-ng (BM25 + recherche vectorielle native)** pour une
-récupération hors-ligne rapide avec **prefetch automatique** avant chaque turn.
+Fournisseur de mémoire (`MemoryProvider`) pour [Hermes Agent](https://github.com/NousResearch/hermes-agent),
+basé sur [whoosh-ng](https://github.com/dorel14/whoosh-ng). Il indexe localement :
 
-- 100 % local : aucun appel réseau n'est obligatoire (Ollama en option).
-- Dégradé proprement en **BM25 pur** si aucun provider d'embeddings n'est
-  disponible.
-- Importable sans whoosh-ng : le backend whoosh-ng est chargé paresseusement
-  par `indexer.py` / `search.py`.
+- chaque tour de conversation (`sync_turn`) ;
+- les écritures de la mémoire intégrée, MEMORY.md et USER.md (`on_memory_write`, avec ajout, remplacement et suppression) ;
+- les notes que l'agent enregistre explicitement (outil `whoosh_add`).
 
-## Enregistrement (Memory Provider)
-
-Le plugin s'enregistre via `register(ctx)` :
-
-```python
-# whoosh_memory/provider.py
-def register(ctx) -> None:
-    ctx.register_memory_provider(WhooshMemoryProvider())
-```
-
-`WhooshMemoryProvider` hérite de `agent.memory_provider.MemoryProvider` et
-implémente `initialize`, `unavailable_reason`, `system_prompt_block`,
-`prefetch`, `sync_turn`, `on_memory_write`, `read_config_fields`,
-`write_config_fields`, `backup_paths`. Aucun `provides_tools` /
-`provides_hooks` dans `plugin.yaml` : ce sont des méthodes du provider, pas des
-hooks de plugin générique.
-
-## Gestion vectorielle (whoosh-ng moderne)
-
-Depuis la v0.3.0, la recherche vectorielle utilise le **vrai champ vectoriel
-natif de whoosh-ng**, `whoosh_modern.fields.VECTOR` — et non l'API 2.x
-classique (`whoosh.fields.VECTOR` n'existe pas ; `VectorField(dimensions=...)`
-de `whoosh.vector` est une API distincte, à fournisseur externe).
-
-- `schema.get_schema(dimension=384)` déclare `embedding=VECTOR(stored=True,
-  dimension=dimension, normalized=True)` : chaque vecteur est L2-normalisé à
-  l'écriture, donc la recherche par `VectorSearcher` est une **similarité
-  cosinus exacte** (produit scalaire).
-- `search.whoosh_search(..., mode="vector")` → `VectorSearcher` (cosinus pur,
-  top-k via `np.argpartition`).
-- `search.whoosh_search(..., mode="hybrid")` → `HybridSearcher` en **mode
-  colonne native** (`vector_column="embedding"`), sans provider externe : le
-  vecteur vit dans l'index, la fusion se fait par `docnum` (pondérée via
-  `alpha`, ou RRF via `rrf_k`).
-- `indexer.index_document(..., embedding=vec)` stocke le vecteur d'un document
-  de l'index principal ; `search.index_documents(..., embeddings=...)` encode
-  chaque chunk à l'indexation.
-- La dimension du champ doit correspondre à celle du provider d'embeddings :
-  `VECTOR(dimension=...)` valide la longueur à l'écriture (sinon
-  `ValueError`). Passez `dimension=` à `whoosh_search`/`index_documents`.
-
-Mode effectif résolu par `whoosh_search` : `mode` (`bm25` | `vector` |
-`hybrid` | `auto`) est prioritaire ; sinon `hybrid` (bool/str) puis
-`use_embeddings`. Sans provider d'embeddings disponible, `vector`/`hybrid`
-retombent sur BM25.
+Avant chaque tour, il injecte les souvenirs pertinents (`prefetch`). Tout est 100 % local, sans appel réseau.
 
 ## Installation
 
-### Depuis les sources (développement)
-
 ```bash
-git clone https://github.com/dorel14/hermes-whoosh-memory.git
-cd hermes-whoosh-memory
-pip install -e .
+hermes plugins install dorel14/hermes-whoosh-memory --enable
 ```
 
-### Depuis GitHub (utilisateur)
+Hermes installe le plugin dans `$HERMES_HOME/plugins/whoosh-memory/`, puis demande l'accord pour
+installer sa dépendance Python (`whoosh-ng>=5.4,<6`, déclarée dans `pyproject.toml`). En mode non
+interactif, ajoute `--yes-deps`.
 
-```bash
-pip install git+https://github.com/dorel14/hermes-whoosh-memory.git
+Active-le ensuite comme fournisseur de mémoire (un seul fournisseur externe peut être actif à la fois) :
+
+```yaml
+# $HERMES_HOME/config.yaml
+memory:
+  provider: whoosh-memory
 ```
 
-### Dépendances
+puis `hermes memory setup` pour régler les options.
 
-- Requis : `whoosh-ng>=0.3.0`
-- Optionnel : `fastembed` (CPU/ONNX, recommandé), `sentence-transformers`
-  (PyTorch), `ollama`, `Pillow` (images)
+## Outils exposés à l'agent
 
-```bash
-pip install "hermes-whoosh-memory[all]"
-```
+| Outil | Rôle |
+|-------|------|
+| `whoosh_search(query, limit=5)` | Recherche plein texte (BM25) |
+| `whoosh_open(id \| path, offset, max_chars)` | Lit un document, page par page |
+| `whoosh_add(content, title?)` | Enregistre une note (l'id est généré) |
+| `whoosh_forget(id \| path)` | Supprime un document |
+| `whoosh_stats()` | Nombre de documents par type |
+
+Chaque outil renvoie du JSON, y compris en cas d'erreur (`{"error": "..."}`).
 
 ## Configuration
 
-```yaml
-# HERMES_HOME/plugin-data/whoosh-memory/config.yaml
-whoosh_memory:
-  index_dir: "plugin-data/whoosh-memory/index"
-  skills_index_dir: "plugin-data/whoosh-memory/skills-index"
-  default_top_k: 10
-  hybrid_enabled: "auto"          # auto | true | false
-  hybrid_method: "rrf"            # rrf | weighted
-  hybrid_weight_bm25: 0.65
-  hybrid_weight_vector: 0.35
-  embedding_provider: "auto"      # auto | fastembed | sentence-transformers | ollama
-  embedding_model: "multilingual-e5-small"
-  embedding_dim: 384
-  embedding_cache_dir: "plugin-data/whoosh-memory/embeddings_cache"
-  chunk_size: 1000
-  chunk_overlap: 150
-  index_images: true
-  index_image_paths: ["~/Photos", "~/Pictures", "~/screenshots"]
-  image_ocr: false
-  image_embedding: true
-  image_embedding_provider: "libembedding-ng"
-  image_max_mb: 20
-  image_max_dimension: 1024
-  image_base64_max_mb: 10
-```
+Fichier : `$HERMES_HOME/whoosh-memory/config.json`, modifiable via `hermes memory setup` ou le panneau
+mémoire du dashboard.
 
-Tous les chemins dérivent de `HERMES_HOME` reçu dans `initialize()`. Aucun
-chemin en dur (`~/.hermes`, `/opt/data`, chemin fourni par un modèle).
+| Clé | Défaut | Rôle |
+|-----|--------|------|
+| `index_sessions` | `true` | Indexer chaque tour de conversation |
+| `prefetch_top_k` | `3` | Nombre de souvenirs injectés avant un tour |
+| `prefetch_max_chars` | `3000` | Budget de caractères du contexte injecté |
 
-## Utilisation CLI
+L'index est stocké dans `$HERMES_HOME/whoosh-memory/index/`, un index par profil Hermes.
+
+## Comportement
+
+- **Sans blocage.** Les écritures passent par une file traitée par un thread unique (`spawn_context_thread`).
+- **Contextes secondaires.** Les sessions `cron`, `subagent` et `flush` n'écrivent rien.
+- **Mode dégradé.** Sans whoosh-ng, le plugin bascule sur un BM25 en pur Python (`index_bm25.json`).
+- **Vie privée.** Aucun dossier personnel (documents, photos) n'est indexé par défaut.
+
+## Dépendances optionnelles
+
+Les modules d'embeddings (`embeddings.py`) et d'images (`images.py`) ne sont pas branchés sur le
+fournisseur dans cette version. Ils s'importent sans leurs dépendances (`fastembed`, `Pillow`…), qui
+s'installent à la main si besoin.
+
+## Développement
 
 ```bash
-whoosh-memory init              # créer les dossiers + config par défaut
-whoosh-memory config            # afficher la configuration
-whoosh-memory search "requête"  # rechercher dans l'index
-whoosh-memory index ./docs      # indexer un dossier de documents
-whoosh-memory index-images ./Photos  # indexer un dossier d'images
-whoosh-memory stats             # statistiques de l'index
+pip install whoosh-ng pytest
+# contrat Hermes réel (module 100 % bibliothèque standard)
+mkdir -p .hermes-contract/agent && touch .hermes-contract/agent/__init__.py
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/agent/memory_provider.py \
+  -o .hermes-contract/agent/memory_provider.py
+pytest
 ```
 
-## Providers et modèles français
-
-| Provider | Modèles | Dimension | Notes |
-|---|---|---|---|
-| fastembed | multilingual-e5-small | 384 | CPU ONNX, sans PyTorch |
-| fastembed | multilingual-e5-base | 768 | CPU ONNX, sans PyTorch |
-| fastembed | bge-small | 512 | CPU ONNX, sans PyTorch |
-| sentence-transformers | BAAI/bge-m3 | 1024 | PyTorch |
-| sentence-transformers | multilingual-e5-base | 768 | PyTorch |
-| ollama | nomic-embed-text | 768 | requiert un serveur Ollama local |
-
-## Fusion hybride
-
-Deux stratégies, pilotées par `hybrid_method` (config) ou le paramètre `mode`
-de `fuse_hybrid` :
-
-- **RRF** (`mode="rrf"`) : `score = sum(1 / (k + rang))`, k=60 par défaut.
-  Idéal quand BM25 et les vecteurs ont des échelles de score incomparables.
-- **Pondérée** (`mode="weighted"`) : `score = alpha * bm25_norm + (1 - alpha) * vector_norm`,
-  avec normalisation min-max. `alpha = hybrid_weight_bm25` par défaut (0.65).
-
-## Cache par haché de contenu
-
-Chaque document est haché (SHA-256) à l'indexation ; un document est réindexé
-uniquement si son haché a changé (`needs_reindex`).
-
-## Mode dégradé (BM25 pur)
-
-Sans provider d'embeddings disponible :
-
-- la recherche vectorielle (`vector`) et la fusion (`hybrid`) retombent
-  automatiquement sur BM25 ;
-- `HybridFuser` avec `mode="bm25"` retourne simplement les résultats BM25.
-
-## Sécurité
-
-Les chemins sous `HERMES_HOME` contenant des credentials sont exclus par une
-denylist stricte. Aucun identifiant, clé d'API ou jeton MCP n'est stocké en
-clair : ils sont anonymisés par `[REDACTED]`. Les images sont indexées avec
-chemin absolu + métadonnées + embedding optionnel (jamais le base64 ni le
-binaire stocké) ; la conversion base64 se fait à la volée via
-`whoosh_image_base64`.
+Le contrat relevé dans le code source de Hermes est documenté dans [docs/HERMES_CONTRACT.md](docs/HERMES_CONTRACT.md).
 
 ## Licence
 
-MIT — voir `LICENSE`.
+MIT, © dorel14.

@@ -93,7 +93,12 @@ config_keys
 - `manifest_version`: 2 recommandé.
 - `api_version`: 1.
 - `version`: chaîne entre guillemets (ex. `"0.4.0"`).
-- `python_dependencies`: validé et surfacé UNIQUEMENT, jamais auto-installé (`plugins_manifest.py:183-188`).
+- `python_dependencies` : `plugins_manifest.py` ne fait que le valider. L'installation est faite par
+  le gestionnaire de paquets (`pm/plugin_declarations.py:read_python_declaration`) après consentement
+  (`hermes_cli/plugins_cmd_install.py:_install_plugin_python_deps`), au moment où l'activation est admise.
+  Un `pyproject.toml` avec une table `[project]` est prioritaire sur le manifeste. S'il contient
+  `[build-system]` ou des `optional-dependencies` non vides, le plugin est construit et installé
+  comme un package : ce dépôt n'en déclare donc pas.
 
 ## 4. Type de plugin
 
@@ -104,3 +109,16 @@ Ce dépôt est un **fournisseur de mémoire** (`register_memory_provider`, class
 ## 5. Chemin de stockage
 
 Tous les chemins dérivent de `hermes_home` reçu dans `initialize()`. Jamais `~/.hermes`, jamais `/opt/data`, jamais un chemin fourni par le modèle. Le dossier d'index par défaut: `hermes_home / "whoosh-memory" / "index"`.
+## 6. Découverte et chargement d'un fournisseur répertoire
+
+Source : `plugins/memory/__init__.py` (dépôt hermes-agent, commit 374a44e1).
+
+- Emplacement : `$HERMES_HOME/plugins/<nom>/`, avec `__init__.py` **à la racine** du dossier.
+- `_is_memory_provider_dir` : le texte de ce `__init__.py` doit mentionner `register_memory_provider`
+  ou `MemoryProvider` (sinon une analyse AST des `.py` de premier niveau).
+- `_load_provider_from_dir` charge le dossier comme un package sous un nom synthétique
+  (`<namespace>.<nom>__source_<hash>`) : les imports relatifs fonctionnent, les imports absolus vers
+  un sous-dossier du plugin ne fonctionnent pas.
+- `register(ctx)` est appelé en premier ; à défaut, la première sous-classe de `MemoryProvider` trouvée.
+- Configuration par défaut (`STORAGE_FLAT_JSON`) : `$HERMES_HOME/<nom>/config.json`.
+- `backup_paths()` ne concerne que l'état **hors** de `HERMES_HOME` (ici : rien).
