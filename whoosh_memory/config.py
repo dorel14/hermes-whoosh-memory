@@ -1,6 +1,7 @@
 """Configuration loader for the whoosh-memory Hermes plugin.
 
-Reads ``$HERMES_HOME/plugin-data/whoosh-memory/config.json`` and merges it
+Reads ``<hermes_home>/whoosh-memory/config.json`` (the flat-JSON file the
+Hermes dashboard memory panel edits) and merges it
 over the defaults below (spec section 8). 100% local, no network calls, no
 secrets stored — this module only loads plain JSON and expands ``~`` in path
 listings. A missing or invalid config file never crashes the plugin: it falls
@@ -21,7 +22,7 @@ DEFAULTS: Dict[str, Any] = {
     # --- Indexing sources (P0/P1) ---
     "index_sessions": True,
     "index_tool_results": False,
-    "index_paths": ["~/Documents", "~/notes"],
+    "index_paths": [],  # aucun dossier personnel par défaut (opt-in)
     "index_skills": True,
     "exclude_patterns": ["*.log", "node_modules", ".git"],
     # --- Chunking ---
@@ -37,7 +38,7 @@ DEFAULTS: Dict[str, Any] = {
     "hybrid_weight_bm25": 0.65,
     "hybrid_weight_vector": 0.35,
     # --- Embeddings (local, optional) ---
-    "embedding_provider": "fastembed",
+    "embedding_provider": "none",  # opt-in : fastembed | ollama | sentence-transformers
     "embedding_model": "BAAI/bge-small-en-v1.5",
     "embedding_dim": 384,
     "embedding_cache": True,
@@ -45,10 +46,10 @@ DEFAULTS: Dict[str, Any] = {
     "max_file_mb": 8,
     "background_refresh": True,
     # --- Images (spec images v0.2) ---
-    "index_images": True,
-    "index_image_paths": ["~/Photos", "~/Pictures", "~/screenshots"],
+    "index_images": False,  # opt-in
+    "index_image_paths": [],
     "image_ocr": False,
-    "image_embedding": True,
+    "image_embedding": False,
     "image_embedding_provider": "libembedding-ng",
     "image_max_mb": 20,
     "image_max_dimension": 1024,
@@ -75,7 +76,7 @@ def hermes_home() -> Path:
 
 #: Absolute path to the plugin's config file under HERMES_HOME (lazy).
 def config_path() -> Path:
-    return hermes_home() / "plugin-data" / "whoosh-memory" / "config.json"
+    return hermes_home() / "whoosh-memory" / "config.json"
 
 
 def _expand_paths(value: Any) -> Any:
