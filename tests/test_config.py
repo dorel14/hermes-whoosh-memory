@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
-from whoosh_memory.config import hermes_home, config_path
+from whoosh_memory.config import config_path
 
 
 class TestHermesHome(unittest.TestCase):
@@ -18,6 +18,7 @@ class TestHermesHome(unittest.TestCase):
         os.environ.pop("HERMES_HOME", None)
         # Recharger le module pour éviter la mise en cache
         import importlib
+
         import whoosh_memory.config as cfg
 
         importlib.reload(cfg)
@@ -27,6 +28,7 @@ class TestHermesHome(unittest.TestCase):
     def test_returns_value_when_set(self):
         os.environ["HERMES_HOME"] = "/tmp/test-hermes-home"
         import importlib
+
         import whoosh_memory.config as cfg
 
         importlib.reload(cfg)

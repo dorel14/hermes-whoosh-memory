@@ -12,10 +12,8 @@ par ``VectorSearcher`` et ``HybridSearcher`` en mode colonne native.
 À noter : le ``whoosh.fields`` legacy (2.x) N'EXPORTE PAS ``VECTOR`` — le
 schéma 2.x classique ``VectorField(dimensions=...)`` de ``whoosh.vector``
 est une API distincte (fournisseur externe) ; le champ natif moderne est
-``whoosh_modern.fields.VECTOR(dimension=..., normalized=...)``.
-
-``normalized=True`` L2-normalise chaque vecteur à l'écriture, ce qui donne
-une similarité cosinus exacte via ``VectorSearcher`` (produit scalaire).
+``whoosh_modern.fields.VECTOR(stored=..., dimension=...)`` (whoosh-ng 5.x
+n'accepte pas de paramètre ``normalized`` : normaliser les vecteurs en amont).
 
 Si ``whoosh_modern`` est indisponible (vieille installation whoosh 2.x),
 le champ ``embedding`` retombe sur ``STORED`` : le plugin fonctionne alors
@@ -83,9 +81,8 @@ def get_schema(dimension: int = DEFAULT_EMBEDDING_DIM) -> object | None:
         return None
 
     if _MODERN_VECTOR is not None:
-        embedding = _MODERN_VECTOR(
-            stored=True, dimension=dimension, normalized=True
-        )
+        # whoosh-ng 5.x : VECTOR(stored, dimension) — pas de paramètre ``normalized``.
+        embedding = _MODERN_VECTOR(stored=True, dimension=dimension)
     else:
         embedding = STORED()
 

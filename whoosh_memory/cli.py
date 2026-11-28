@@ -21,11 +21,11 @@ from .search import whoosh_search
 
 
 def _default_index_dir() -> Path:
-    return hermes_home() / "plugin-data" / "whoosh-memory" / "index"
+    return hermes_home() / "whoosh-memory" / "index"
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    pdata = hermes_home() / "plugin-data" / "whoosh-memory"
+    pdata = hermes_home() / "whoosh-memory"
     (pdata / "index").mkdir(parents=True, exist_ok=True)
     (pdata / "skills-index").mkdir(parents=True, exist_ok=True)
     (pdata / "embeddings").mkdir(parents=True, exist_ok=True)

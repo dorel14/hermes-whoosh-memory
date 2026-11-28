@@ -1,4 +1,0 @@
-include README.md
-include LICENSE
-include plugin.yaml
-recursive-include whoosh_memory *.py *.yaml *.md

@@ -90,7 +90,7 @@ class EmbeddingConfig:
         except (TypeError, ValueError):
             dim = DEFAULT_DIM
         
-        default_cache = hermes_home / "plugin-data" / "whoosh-memory" / "embeddings_cache"
+        default_cache = hermes_home / "whoosh-memory" / "embeddings_cache"
         cache_dir = get("embedding_cache_dir", default_cache)
         
         return cls(
