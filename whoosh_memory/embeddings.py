@@ -55,8 +55,8 @@ FR_MODELS: dict[str, tuple[str, int]] = {
     "multilingual-e5-small": ("intfloat/multilingual-e5-small", 384),
 }
 
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
-DEFAULT_CACHE_DIR = HERMES_HOME / "plugin-data" / "whoosh-memory" / "embeddings_cache"
+# No global hardcoded HERMES_HOME; resolve via provider.initialize().
+# DEFAULT_CACHE_DIR is constructed by EmbeddingConfig via provider._hermes_home.
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ class EmbeddingConfig:
     provider: str = "auto"            # auto | fastembed | sentence-transformers | ollama
     model: str = "multilingual-e5-small"
     dim: int = DEFAULT_DIM
-    cache_dir: Path = DEFAULT_CACHE_DIR
+    cache_dir: Path | None = None
     cache_enabled: bool = True
     ollama_host: str = "http://localhost:11434"
     ollama_timeout: float = 10.0
@@ -74,10 +74,11 @@ class EmbeddingConfig:
     enabled: bool = True              # False -> mode degrade BM25 pur dès l'initialisation
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "cache_dir", Path(os.path.expanduser(str(self.cache_dir))))
+        if self.cache_dir is not None:
+            object.__setattr__(self, "cache_dir", Path(os.path.expanduser(str(self.cache_dir))))
 
     @classmethod
-    def from_config(cls, cfg: Mapping[str, Any] | None) -> "EmbeddingConfig":
+    def from_config(cls, cfg: Mapping[str, Any] | None, hermes_home: Path) -> "EmbeddingConfig":
         """Construit la config depuis un dict de type ``whoosh_memory.config``."""
 
         def get(key: str, default: Any) -> Any:
@@ -88,7 +89,10 @@ class EmbeddingConfig:
             dim = int(dim)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             dim = DEFAULT_DIM
-        cache_dir = get("embedding_cache_dir", DEFAULT_CACHE_DIR)
+        
+        default_cache = hermes_home / "whoosh-memory" / "embeddings_cache"
+        cache_dir = get("embedding_cache_dir", default_cache)
+        
         return cls(
             provider=str(get("embedding_provider", "auto")),
             model=str(get("embedding_model", "multilingual-e5-small")),
@@ -216,8 +220,8 @@ class SentenceTransformersProvider:
             import sentence_transformers  # noqa: F401  (presence check)
         except ImportError as exc:
             raise ImportError(
-                "sentence-transformers est requis pour le provider '"
-                "sentence-transformers'. Installez-le : "
+                "sentence-transformers est requis pour le provider "
+                "'sentence-transformers'. Installez-le : "
                 "pip install sentence-transformers"
             ) from exc
         from sentence_transformers import SentenceTransformer
@@ -568,6 +572,7 @@ class Embeddings:
         except FileNotFoundError:
             pass
 
+
 # --------------------------------------------------------------------------- #
 # Fusion hybride (Section 7.3)
 # --------------------------------------------------------------------------- #
@@ -690,6 +695,7 @@ def fuse_hybrid(
 ) -> list[ScoredDoc]:
     """Fonction commode : fusionne BM25 et vecteurs en un appel."""
     return HybridFuser(mode=mode, alpha=alpha, rrf_k=rrf_k).fuse(bm25, vector)
+
 
 __all__ = [
     "DEFAULT_DIM",

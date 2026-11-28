@@ -1,66 +1,40 @@
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+# Déclaration des dépendances lue par Hermes (pm/plugin_declarations.py :
+# read_python_declaration). Volontairement SANS [build-system] ni
+# [project.optional-dependencies] : le plugin reste un plugin répertoire dont
+# seules les `dependencies` sont résolues dans l'environnement partagé de
+# Hermes, après consentement, au moment de l'activation.
+#
+# Dépendances optionnelles (à installer à la main dans l'environnement Hermes) :
+#   fastembed>=0.3,<1                (embeddings locaux CPU/ONNX)
+#   sentence-transformers>=2.5,<4    (embeddings PyTorch)
+#   ollama>=0.1,<1                   (embeddings via un serveur Ollama local)
+#   Pillow>=10,<12                   (images)
 
 [project]
 name = "hermes-whoosh-memory"
-version = "0.3.0"
-description = "Local hybrid (BM25 + vector) memory provider for Hermes Agent: indexes session history, MEMORY.md / USER.md, local documents, skills and images into a whoosh-ng index for fast offline retrieval with context prefetch."
+version = "0.4.0"
+description = "Mémoire locale hybride (BM25 + vecteurs optionnels) pour Hermes Agent, basée sur whoosh-ng."
 readme = "README.md"
-requires-python = ">=3.9"
-license = {text = "MIT"}
-authors = [{name = "NousResearch", email = "contact@nousresearch.com"}]
-keywords = ["hermes", "memory", "whoosh", "search", "bm25", "vector", "images"]
-classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Operating System :: OS Independent",
-    "Topic :: Communications :: Chat",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "David Orel (dorel14)" }]
 dependencies = [
-    "whoosh-ng>=0.3.0",
+    "whoosh-ng>=5.4,<6",
 ]
 
-[project.optional-dependencies]
-embeddings = [
-    "fastembed>=0.3.0",
-]
-sentence-transformers = [
-    "sentence-transformers>=2.5.0",
-]
-ollama = [
-    "ollama>=0.1.0",
-]
-images = [
-    "Pillow>=10.0.0",
-]
-all = [
-    "whoosh-ng>=0.3.0",
-    "fastembed>=0.3.0",
-    "Pillow>=10.0.0",
-]
-
-[project.scripts]
-whoosh-memory = "whoosh_memory.cli:main"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["whoosh_memory*"]
-
-[tool.setuptools.package-data]
-whoosh_memory = ["plugin.yaml", "README.md"]
-
-[tool.black]
-line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312']
+[project.urls]
+Homepage = "https://github.com/dorel14/hermes-whoosh-memory"
+Issues = "https://github.com/dorel14/hermes-whoosh-memory/issues"
 
 [tool.ruff]
 line-length = 100
-select = ["E", "F", "I", "N", "S"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+# La racine du dépôt est elle-même un package (le plugin) : import mode
+# "importlib" pour que pytest n'essaie pas d'importer le __init__.py racine.
+addopts = "--import-mode=importlib"
+testpaths = ["tests"]

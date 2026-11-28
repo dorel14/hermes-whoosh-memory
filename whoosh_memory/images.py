@@ -25,14 +25,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-from PIL import Image
-
 from .config import DEFAULTS
 from .extractors import chunk_text
 from .schema import DEFAULT_EMBEDDING_DIM
 from .search import _Index, SearchHit, whoosh_search
 
 logger = logging.getLogger("hermes.plugins.whoosh-memory.images")
+
+
+def _pil_image():
+    """Importe Pillow à la demande (dépendance optionnelle, extra ``images``)."""
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - dépend de l'environnement
+        raise RuntimeError(
+            "whoosh-memory : Pillow est requis pour les images (pip install Pillow)."
+        ) from exc
+    return Image
 
 # Extensions d'images supportées.
 IMAGE_EXTENSIONS = {
@@ -59,7 +68,7 @@ def _content_hash_for_image(path: Path) -> str:
 def image_metadata(path: Path) -> dict:
     """Métadonnées de l'image (taille, dimensions, format, etc.)."""
     try:
-        with Image.open(path) as im:
+        with _pil_image().open(path) as im:
             return {
                 "width": im.width,
                 "height": im.height,
@@ -80,7 +89,7 @@ def image_to_base64(
     le base64 dans l'index ni dans les logs.
     """
     meta = image_metadata(path)
-    with Image.open(path) as im:
+    with _pil_image().open(path) as im:
         # Convertir en RGB pour un JPEG compatible si nécessaire.
         if im.mode in ("RGBA", "P", "LA"):
             im = im.convert("RGB")
@@ -283,6 +292,7 @@ def search_images(
         hybrid=hybrid,
         embeddings=embeddings,
     )
+
 
 __all__ = [
     "IMAGE_EXTENSIONS",

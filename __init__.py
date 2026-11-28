@@ -1,20 +1,13 @@
-"""whoosh-memory plugin for Hermes Agent — package entry point.
+"""whoosh-memory — fournisseur de mémoire (MemoryProvider) pour Hermes Agent.
 
-Local hybrid (BM25 + vector) memory provider: indexes Hermes session
-history, MEMORY.md / USER.md, local documents, skills and images into a
-whoosh-ng index for fast offline retrieval with automatic context
-prefetch before each turn. 100 % local, no network calls.
-
-The real plugin registration lives in ``whoosh_memory/__init__.py``; this
-thin shim re-exports everything so ``import whoosh_memory`` works whether
-the package is installed via pip or added directly to PYTHONPATH.
+Point d'entrée lu par Hermes quand le plugin est installé dans
+``$HERMES_HOME/plugins/whoosh-memory/`` : ``register(ctx)`` appelle
+``ctx.register_memory_provider(WhooshMemoryProvider())``.
 """
 
-from whoosh_memory import (
-    DEFAULTS,
-    load_config,
-    register,
-    __version__,
-)
+if __package__:
+    from .whoosh_memory.provider import WhooshMemoryProvider, register
 
-__all__ = ["__version__", "register", "DEFAULTS", "load_config"]
+    __all__ = ["WhooshMemoryProvider", "register"]
+# Sans package parent (pytest qui collecte la racine du dépôt), il n'y a rien à
+# exposer : Hermes, lui, charge toujours ce fichier comme un package.

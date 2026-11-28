@@ -1,6 +1,7 @@
 """Configuration loader for the whoosh-memory Hermes plugin.
 
-Reads ``$HERMES_HOME/plugin-data/whoosh-memory/config.json`` and merges it
+Reads ``<hermes_home>/whoosh-memory/config.json`` (the flat-JSON file the
+Hermes dashboard memory panel edits) and merges it
 over the defaults below (spec section 8). 100% local, no network calls, no
 secrets stored — this module only loads plain JSON and expands ``~`` in path
 listings. A missing or invalid config file never crashes the plugin: it falls
@@ -14,14 +15,14 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-__all__ = ["DEFAULTS", "hermes_home", "CONFIG_PATH", "load_config"]
+__all__ = ["DEFAULTS", "hermes_home", "config_path", "load_config"]
 
 #: Default configuration — mirrors spec section 8 ("Configuration exemple").
 DEFAULTS: Dict[str, Any] = {
     # --- Indexing sources (P0/P1) ---
     "index_sessions": True,
     "index_tool_results": False,
-    "index_paths": ["~/Documents", "~/notes"],
+    "index_paths": [],  # aucun dossier personnel par défaut (opt-in)
     "index_skills": True,
     "exclude_patterns": ["*.log", "node_modules", ".git"],
     # --- Chunking ---
@@ -37,7 +38,7 @@ DEFAULTS: Dict[str, Any] = {
     "hybrid_weight_bm25": 0.65,
     "hybrid_weight_vector": 0.35,
     # --- Embeddings (local, optional) ---
-    "embedding_provider": "fastembed",
+    "embedding_provider": "none",  # opt-in : fastembed | ollama | sentence-transformers
     "embedding_model": "BAAI/bge-small-en-v1.5",
     "embedding_dim": 384,
     "embedding_cache": True,
@@ -45,10 +46,10 @@ DEFAULTS: Dict[str, Any] = {
     "max_file_mb": 8,
     "background_refresh": True,
     # --- Images (spec images v0.2) ---
-    "index_images": True,
-    "index_image_paths": ["~/Photos", "~/Pictures", "~/screenshots"],
+    "index_images": False,  # opt-in
+    "index_image_paths": [],
     "image_ocr": False,
-    "image_embedding": True,
+    "image_embedding": False,
     "image_embedding_provider": "libembedding-ng",
     "image_max_mb": 20,
     "image_max_dimension": 1024,
@@ -57,15 +58,25 @@ DEFAULTS: Dict[str, Any] = {
 
 
 def hermes_home() -> Path:
-    """Resolve ``$HERMES_HOME`` (fallback: /opt/data)."""
+    """Resolve ``$HERMES_HOME``.
+
+    Raises:
+        RuntimeError: if ``$HERMES_HOME`` is not set. Paths must always derive
+            from the ``hermes_home`` received in ``initialize()``; we never
+            guess ``~/.hermes`` or any other hardcoded location (spec R6).
+    """
     env = os.environ.get("HERMES_HOME")
     if env:
         return Path(env).expanduser()
-    return Path("/opt/data")
+    raise RuntimeError(
+        "whoosh-memory: $HERMES_HOME n'est pas défini. "
+        "Lancez le plugin via Hermes, ou définissez HERMES_HOME pour l'usage CLI."
+    )
 
 
-#: Absolute path to the plugin's config file under HERMES_HOME.
-CONFIG_PATH: Path = hermes_home() / "plugin-data" / "whoosh-memory" / "config.json"
+#: Absolute path to the plugin's config file under HERMES_HOME (lazy).
+def config_path() -> Path:
+    return hermes_home() / "whoosh-memory" / "config.json"
 
 
 def _expand_paths(value: Any) -> Any:
@@ -89,7 +100,7 @@ def load_config(path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
         Never raises on a missing or malformed file — the defaults win.
     """
     cfg: Dict[str, Any] = dict(DEFAULTS)
-    p = Path(path) if path is not None else CONFIG_PATH
+    p = Path(path) if path is not None else config_path()
     try:
         with open(p, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -106,7 +117,3 @@ def load_config(path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     if isinstance(cfg.get("index_paths"), list):
         cfg["index_paths"] = _expand_paths(cfg["index_paths"])
     return cfg
-
-
-#: Convenience handle — the resolved config at import time (reload via load_config()).
-config: Dict[str, Any] = load_config()

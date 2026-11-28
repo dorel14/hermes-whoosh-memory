@@ -24,6 +24,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+
+def _tokenize(text: str) -> list[str]:
+    """Tokenise un texte en minuscules (alphanumérique uniquement)."""
+    return re.findall(r"[a-zA-Z0-9\u00c0-\u024f]+", text.lower())
+
+
 from .extractors import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
@@ -38,8 +44,8 @@ _WORD_RE = re.compile(r"\w+", re.UNICODE)
 # whoosh + whoosh_modern sont optionnels (degradation BM25 pur sinon).
 try:
     from whoosh.fields import ID, Schema, TEXT  # noqa: F401  (fallback ci-dessous)
-    from whoosh.index import create_in, open_dir
-    from whoosh.qparser import QueryParser
+    from whoosh.index import create_in, exists_in, open_dir
+    from whoosh.qparser import OrGroup, QueryParser
     from whoosh.scoring import BM25F
 
     _WHOOSH_AVAILABLE = True
@@ -67,11 +73,11 @@ def _make_schema(dimension: int) -> Schema:
         "path": ID(stored=True),
         "title": TEXT(stored=True),
         "content": TEXT(stored=True),
+        "type": ID(stored=True),
     }
     if _VECTOR_AVAILABLE:
-        fields["embedding"] = VECTOR(
-            stored=True, dimension=dimension, normalized=True
-        )
+        # whoosh-ng 5.x : VECTOR(stored, dimension), sans ``normalized``.
+        fields["embedding"] = VECTOR(stored=True, dimension=dimension)
     return Schema(**fields)
 
 
@@ -99,21 +105,26 @@ class _PyBM25Index:
         self.idf: dict[str, float] = {}
         self.avgdl = 0.0
 
-    def add(self, doc_id: str, path: str, title: str, text: str) -> None:
-        tokens = _tokenize(text)
+    def add(self, doc_id: str, path: str, title: str, text: str, doc_type: str = "") -> None:
+        """Ajoute ou remplace (upsert sur ``doc_id``) un document."""
+        self.docs = [d for d in self.docs if d.get("id") != doc_id]
         self.docs.append(
             {
                 "id": doc_id,
                 "path": path,
                 "title": title,
                 "text": text,
-                "tokens": tokens,
+                "type": doc_type,
+                "tokens": _tokenize(text),
             }
         )
-        for token in set(tokens):
-            self.df[token] = self.df.get(token, 0) + 1
 
     def finish(self) -> None:
+        self.df = {}
+        for doc in self.docs:
+            for token in set(doc.get("tokens") or _tokenize(doc.get("text", ""))):
+                self.df[token] = self.df.get(token, 0) + 1
+        self.idf = {}
         n = len(self.docs)
         total = sum(len(d["tokens"]) for d in self.docs)
         self.avgdl = total / n if n else 0.0
@@ -190,7 +201,7 @@ class _Index:
         if _WHOOSH_AVAILABLE:
             try:
                 self.index_dir.mkdir(parents=True, exist_ok=True)
-                if any(self.index_dir.iterdir()):
+                if exists_in(str(self.index_dir)):
                     self._whoosh = open_dir(str(self.index_dir))
                 else:
                     self._whoosh = create_in(str(self.index_dir), _make_schema(dimension))
@@ -240,18 +251,104 @@ class _Index:
         title: str,
         text: str,
         embedding: Optional[Sequence[float]] = None,
+        doc_type: str = "",
     ) -> None:
+        """Ajoute ou remplace (upsert sur ``doc_id``) un document."""
         if not text:
             return
         if self._whoosh is not None:
-            writer = self._whoosh.writer()
             fields = {"doc_id": doc_id, "path": path, "title": title, "content": text}
-            if embedding is not None and _VECTOR_AVAILABLE:
+            names = self._whoosh.schema.names()
+            if "type" in names:
+                fields["type"] = doc_type
+            if embedding is not None and _VECTOR_AVAILABLE and "embedding" in names:
                 fields["embedding"] = list(embedding)
-            writer.add_document(**fields)
+            writer = self._whoosh.writer()
+            writer.update_document(**fields)
             writer.commit()
         else:
-            self._py.add(doc_id, path, title, text)
+            self._py.add(doc_id, path, title, text, doc_type)
+
+    # -- Accès direct (open / forget / stats), pour les deux moteurs ---------
+
+    def get(self, doc_id: Optional[str] = None, path: Optional[str] = None) -> Optional[dict]:
+        """Renvoie ``{id, path, title, type, text}`` du premier document trouvé."""
+        if not doc_id and not path:
+            return None
+        if self._whoosh is not None:
+            with self._whoosh.searcher() as searcher:
+                stored = (
+                    searcher.document(doc_id=doc_id) if doc_id else searcher.document(path=path)
+                )
+            if not stored:
+                return None
+            return {
+                "id": stored.get("doc_id"),
+                "path": stored.get("path"),
+                "title": stored.get("title"),
+                "type": stored.get("type", ""),
+                "text": stored.get("content", ""),
+            }
+        assert self._py is not None
+        for doc in self._py.docs:
+            if (doc_id and doc.get("id") == doc_id) or (path and doc.get("path") == path):
+                return {
+                    "id": doc.get("id"),
+                    "path": doc.get("path"),
+                    "title": doc.get("title"),
+                    "type": doc.get("type", ""),
+                    "text": doc.get("text", ""),
+                }
+        return None
+
+    def delete(self, doc_id: Optional[str] = None, path: Optional[str] = None) -> int:
+        """Supprime par ``doc_id`` ou par ``path`` ; renvoie le nombre supprimé."""
+        if not doc_id and not path:
+            return 0
+        if self._whoosh is not None:
+            writer = self._whoosh.writer()
+            removed = writer.delete_by_term("doc_id", doc_id) if doc_id else 0
+            if path:
+                removed += writer.delete_by_term("path", path)
+            writer.commit()
+            return int(removed or 0)
+        assert self._py is not None
+        before = len(self._py.docs)
+        self._py.docs = [
+            d
+            for d in self._py.docs
+            if not ((doc_id and d.get("id") == doc_id) or (path and d.get("path") == path))
+        ]
+        return before - len(self._py.docs)
+
+    def stats(self) -> dict:
+        """Nombre de documents, répartition par type et volume de texte."""
+        by_type: dict[str, int] = {}
+        total_chars = 0
+        if self._whoosh is not None:
+            with self._whoosh.searcher() as searcher:
+                docs = list(searcher.all_stored_fields())
+            for d in docs:
+                t = d.get("type") or "unknown"
+                by_type[t] = by_type.get(t, 0) + 1
+                total_chars += len(d.get("content", ""))
+            n = len(docs)
+            backend = "whoosh"
+        else:
+            assert self._py is not None
+            for d in self._py.docs:
+                t = d.get("type") or "unknown"
+                by_type[t] = by_type.get(t, 0) + 1
+                total_chars += len(d.get("text", ""))
+            n = len(self._py.docs)
+            backend = "bm25_pure"
+        return {
+            "documents": n,
+            "by_type": by_type,
+            "total_chars": total_chars,
+            "backend": backend,
+            "vector_available": bool(self._whoosh is not None and _VECTOR_AVAILABLE),
+        }
 
     def finish(self) -> None:
         if self._py is not None:
@@ -264,7 +361,7 @@ class _Index:
         """Recherche BM25F via QueryParser sur ``content``."""
         if self._whoosh is not None:
             with self._whoosh.searcher(weighting=BM25F) as searcher:
-                parser = QueryParser("content", self._whoosh.schema)
+                parser = QueryParser("content", self._whoosh.schema, group=OrGroup.factory(0.9))
                 try:
                     q = parser.parse(query)
                 except Exception:
@@ -343,7 +440,7 @@ class _Index:
         if self._whoosh is None or not _VECTOR_AVAILABLE or HybridSearcher is None:
             return []
         with self._whoosh.searcher(weighting=BM25F) as searcher:
-            parser = QueryParser("content", self._whoosh.schema)
+            parser = QueryParser("content", self._whoosh.schema, group=OrGroup.factory(0.9))
             try:
                 parsed = parser.parse(query)
             except Exception:
@@ -521,11 +618,13 @@ def index_documents(
             doc_id = f"skill:{document.path}"
             path = document.path
             title = document.title
+            doc_type = "skill"
         else:
             text = document.text
             doc_id = f"file:{document.path}"
             path = document.path
             title = document.title
+            doc_type = "file"
         chunks = chunk_text(
             text, size=DEFAULT_CHUNK_SIZE, overlap=DEFAULT_CHUNK_OVERLAP
         )
@@ -537,7 +636,7 @@ def index_documents(
                     vec = embeddings.embed(chunk)
                 except Exception:
                     vec = None
-            index.add(chunk_id, path, title, chunk, embedding=vec)
+            index.add(chunk_id, path, title, chunk, embedding=vec, doc_type=doc_type)
             count += 1
     index.finish()
     return count

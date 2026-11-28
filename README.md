@@ -1,93 +1,85 @@
-# whoosh-memory — Mémoire locale hybride pour Hermes Agent
+# whoosh-memory — mémoire locale pour Hermes Agent
 
-Un plugin Hermes 100 % local qui indexe l'historique des sessions, MEMORY.md / USER.md,
-les documents locaux, les skills Hermes et les images dans un index whoosh-ng
-(BM25 + recherche vectorielle native) pour une récupération hors-ligne rapide
-avec prefetch automatique avant chaque turn.
+Fournisseur de mémoire (`MemoryProvider`) pour [Hermes Agent](https://github.com/NousResearch/hermes-agent),
+basé sur [whoosh-ng](https://github.com/dorel14/whoosh-ng). Il indexe localement :
+
+- chaque tour de conversation (`sync_turn`) ;
+- les écritures de la mémoire intégrée, MEMORY.md et USER.md (`on_memory_write`, avec ajout, remplacement et suppression) ;
+- les notes que l'agent enregistre explicitement (outil `whoosh_add`).
+
+Avant chaque tour, il injecte les souvenirs pertinents (`prefetch`). Tout est 100 % local, sans appel réseau.
 
 ## Installation
 
-### Depuis les sources (développement)
-
 ```bash
-git clone https://github.com/dorel14/hermes-whoosh-memory.git
-cd hermes-whoosh-memory
-pip install -e .
+hermes plugins install dorel14/hermes-whoosh-memory --enable
 ```
 
-### Depuis GitHub (utilisateur)
+Hermes installe le plugin dans `$HERMES_HOME/plugins/whoosh-memory/`, puis demande l'accord pour
+installer sa dépendance Python (`whoosh-ng>=5.4,<6`, déclarée dans `pyproject.toml`). En mode non
+interactif, ajoute `--yes-deps`.
 
-```bash
-pip install git+https://github.com/dorel14/hermes-whoosh-memory.git
+Active-le ensuite comme fournisseur de mémoire (un seul fournisseur externe peut être actif à la fois) :
+
+```yaml
+# $HERMES_HOME/config.yaml
+memory:
+  provider: whoosh-memory
 ```
 
-### Déploiement pour Lina (sur l'hôte Hermes)
+puis `hermes memory setup` pour régler les options.
 
-```bash
-cd /opt/data/plugins/hermes-whoosh-memory
-pip install -e .
-# puis déclarer le plugin dans la config de Lina
-```
-
-## Utilisation CLI
-
-```bash
-whoosh-memory init              # créer les dossiers + config par défaut
-whoosh-memory config            # afficher la configuration
-whoosh-memory search "requête"  # rechercher dans l'index
-whoosh-memory index ./docs      # indexer un dossier de documents
-whoosh-memory index-images ./Photos  # indexer un dossier d'images
-whoosh-memory stats             # statistiques de l'index
-```
-
-## Outils agents (MCP / registre Hermes)
+## Outils exposés à l'agent
 
 | Outil | Rôle |
 |-------|------|
-| `whoosh_search` | Recherche hybride (texte + vecteur) dans l'index |
-| `whoosh_open` | Lire un document par id ou path |
-| `whoosh_forget` | Supprimer un document de l'index |
-| `whoosh_stats` | Statistiques de l'index |
-| `whoosh_add` | Ajouter un document manuellement |
-| `whoosh_image_base64` | Convertir une image indexée en base64 pour le MCP vision |
-| `whoosh_image_info` | Métadonnées d'une image indexée |
+| `whoosh_search(query, limit=5)` | Recherche plein texte (BM25) |
+| `whoosh_open(id \| path, offset, max_chars)` | Lit un document, page par page |
+| `whoosh_add(content, title?)` | Enregistre une note (l'id est généré) |
+| `whoosh_forget(id \| path)` | Supprime un document |
+| `whoosh_stats()` | Nombre de documents par type |
 
-## Indexation d'images (spec v0.2)
+Chaque outil renvoie du JSON, y compris en cas d'erreur (`{"error": "..."}`).
 
-Les images sont indexées avec chemin absolu + métadonnées + embedding optionnel
-(jamais le base64 ni le binaire stocké). La conversion base64 se fait à la
-volée via `whoosh_image_base64` pour le MCP vision existant.
+## Configuration
 
-Configuration (dans `whoosh-memory.json` sous `HERMES_HOME/plugin-data/whoosh-memory/`) :
+Fichier : `$HERMES_HOME/whoosh-memory/config.json`, modifiable via `hermes memory setup` ou le panneau
+mémoire du dashboard.
 
-```json
-{
-  "index_images": true,
-  "index_image_paths": ["~/Photos", "~/Pictures", "~/screenshots"],
-  "image_ocr": false,
-  "image_embedding": true,
-  "image_embedding_provider": "libembedding-ng",
-  "image_max_mb": 20,
-  "image_max_dimension": 1024,
-  "image_base64_max_mb": 10
-}
-```
+| Clé | Défaut | Rôle |
+|-----|--------|------|
+| `index_sessions` | `true` | Indexer chaque tour de conversation |
+| `prefetch_top_k` | `3` | Nombre de souvenirs injectés avant un tour |
+| `prefetch_max_chars` | `3000` | Budget de caractères du contexte injecté |
 
-## Sécurité
+L'index est stocké dans `$HERMES_HOME/whoosh-memory/index/`, un index par profil Hermes.
 
-Les chemins sous `HERMES_HOME` contenant des credentials sont exclus par une
-denylist stricte. Aucun identifiant, clé d'API ou jeton MCP n'est stocké en
-clair : ils sont anonymisés par `[REDACTED]`.
+## Comportement
 
-## Dépendances
+- **Sans blocage.** Les écritures passent par une file traitée par un thread unique (`spawn_context_thread`).
+- **Contextes secondaires.** Les sessions `cron`, `subagent` et `flush` n'écrivent rien.
+- **Mode dégradé.** Sans whoosh-ng, le plugin bascule sur un BM25 en pur Python (`index_bm25.json`).
+- **Vie privée.** Aucun dossier personnel (documents, photos) n'est indexé par défaut.
 
-- Requis : `whoosh-ng>=0.3.0`
-- Optionnel : `fastembed`, `sentence-transformers`, `ollama`, `Pillow`
+## Dépendances optionnelles
+
+Les modules d'embeddings (`embeddings.py`) et d'images (`images.py`) ne sont pas branchés sur le
+fournisseur dans cette version. Ils s'importent sans leurs dépendances (`fastembed`, `Pillow`…), qui
+s'installent à la main si besoin.
+
+## Développement
 
 ```bash
-pip install "hermes-whoosh-memory[all]"
+pip install whoosh-ng pytest
+# contrat Hermes réel (module 100 % bibliothèque standard)
+mkdir -p .hermes-contract/agent && touch .hermes-contract/agent/__init__.py
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/agent/memory_provider.py \
+  -o .hermes-contract/agent/memory_provider.py
+pytest
 ```
+
+Le contrat relevé dans le code source de Hermes est documenté dans [docs/HERMES_CONTRACT.md](docs/HERMES_CONTRACT.md).
 
 ## Licence
 
-MIT — voir `LICENSE`.
+MIT, © dorel14.

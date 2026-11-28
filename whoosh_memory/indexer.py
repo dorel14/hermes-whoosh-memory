@@ -30,10 +30,8 @@ from .schema import TYPE_SESSION_TURN, SCHEMA, get_schema
 
 logger = logging.getLogger("hermes.plugins.whoosh-memory.indexer")
 
-HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
-PLUGIN_DATA = os.path.join(HERMES_HOME, "plugin-data", "whoosh-memory")
-INDEX_DIR = os.path.join(PLUGIN_DATA, "index")          # conversations + mémoire + fichiers
-SKILLS_INDEX_DIR = os.path.join(PLUGIN_DATA, "skills-index")  # skills Markdown (index séparé)
+# No module-level hardcoded HERMES_HOME/INDEX_DIR — index paths are passed in
+# explicitly by the caller (provider.initialize resolves them from hermes_home).
 
 
 def content_hash(content: str, mtime: Optional[float] = None,
@@ -62,14 +60,14 @@ def _open_or_recreate(index_dir: str, schema) -> WhooshIndex:
         return create_in(index_dir, schema)
 
 
-def open_main_index() -> WhooshIndex:
+def open_main_index(index_dir: str) -> WhooshIndex:
     """Ouvre (ou recrée) l'index principal conversations/mémoire/fichiers."""
-    return _open_or_recreate(INDEX_DIR, get_schema())
+    return _open_or_recreate(index_dir, get_schema())
 
 
-def open_skills_index() -> WhooshIndex:
+def open_skills_index(index_dir: str) -> WhooshIndex:
     """Ouvre (ou recrée) l'index séparé des skills Markdown."""
-    return _open_or_recreate(SKILLS_INDEX_DIR, get_schema())
+    return _open_or_recreate(index_dir, get_schema())
 
 
 def _normalize_timestamp(value: Any) -> datetime:

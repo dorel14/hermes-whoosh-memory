@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main, refactor/memory-provider]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "whoosh-ng>=5.4,<6" pytest ruff
+
+      # Les tests du fournisseur tournent contre le VRAI contrat Hermes :
+      # agent/memory_provider.py n'utilise que la bibliothèque standard.
+      - name: Fetch Hermes MemoryProvider contract
+        run: |
+          mkdir -p .hermes-contract/agent
+          touch .hermes-contract/agent/__init__.py
+          curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/agent/memory_provider.py \
+            -o .hermes-contract/agent/memory_provider.py
+
+      - name: Lint
+        run: ruff check __init__.py whoosh_memory/__init__.py whoosh_memory/provider.py whoosh_memory/tools.py tests/
+
+      - name: Tests
+        run: pytest -v -rs

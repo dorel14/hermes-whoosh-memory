@@ -1,56 +1,15 @@
-manifest_version: 2
-api_version: 1
 name: whoosh-memory
-version: "0.3.0"
-description: Mémoire locale hybride (BM25 + vecteur) pour Hermes Agent
-author: NousResearch
+version: "0.4.0"
+description: "Mémoire locale hybride (BM25 + vecteurs optionnels) sur whoosh-ng : indexe les conversations et les entrées MEMORY.md / USER.md, injecte le contexte pertinent avant chaque tour. 100 % local."
+author: "David Orel (dorel14)"
 license: MIT
 homepage: https://github.com/dorel14/hermes-whoosh-memory
 requires_hermes: ">=0.21"
 tags: [memory, whoosh, search]
-entry_point: whoosh_memory.__init__:register
-package: whoosh_memory
-
-config:
-  index_dir: null
-  max_file_mb: 8
-  background_refresh: true
-  index_images: true
-  index_image_paths:
-    - ~/Photos
-    - ~/Pictures
-    - ~/screenshots
-  image_ocr: false
-  image_embedding: true
-  image_embedding_provider: libembedding-ng
-  image_max_mb: 20
-  image_max_dimension: 1024
-  image_base64_max_mb: 10
-
-provides_tools:
-  - whoosh_search
-  - whoosh_open
-  - whoosh_forget
-  - whoosh_stats
-  - whoosh_add
-  - whoosh_image_base64
-  - whoosh_image_info
-
-provides_hooks:
+hooks:
   - prefetch
   - sync_turn
   - on_memory_write
   - on_session_end
-  - on_pre_compress
-
-denylist:
-  - HERMES_HOME
-  - credentials
-  - api_key
-  - secret
-  - token
-
-local_only: true
-
-python_dependencies:
-  - "whoosh-ng>=0.3.0"
+  - on_session_switch
+  - system_prompt_block
